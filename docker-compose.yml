@@ -1,0 +1,125 @@
+version: "3.8"
+
+# ============================================================================
+#  AI Sales Bot — Docker Compose
+#  Services: n8n (orchestration) + fastapi (AI backend) + streamlit (dashboard)
+#
+#  Quick start:
+#    cp .env.example .env   # fill in your tokens
+#    docker-compose up -d
+#    open http://localhost:5678   # n8n
+#    open http://localhost:8501   # streamlit dashboard
+# ============================================================================
+
+services:
+
+  # --------------------------------------------------------------------------
+  # N8N — workflow orchestration
+  # --------------------------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: ai-sales-n8n
+    restart: unless-stopped
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - WEBHOOK_URL=${N8N_WEBHOOK_URL:-http://localhost:5678}
+      - GENERIC_TIMEZONE=Asia/Bangkok
+      - N8N_LOG_LEVEL=info
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=false
+      # Pass app credentials through so N8N can call external APIs
+      - FB_PAGE_ACCESS_TOKEN=${FB_PAGE_ACCESS_TOKEN:-}
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN:-}
+      - LINE_NOTIFY_TOKEN=${LINE_NOTIFY_TOKEN:-}
+      - FASTAPI_INTERNAL_URL=http://fastapi:8000
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/home/node/workflows:ro   # workflow JSON files for import
+    networks:
+      - ai-sales-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --------------------------------------------------------------------------
+  # FastAPI — AI processing backend
+  # --------------------------------------------------------------------------
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-sales-api
+    restart: unless-stopped
+    command: uvicorn main_api:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Ollama runs on the host machine, not in Docker
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    volumes:
+      - app_data:/app/data
+      - ./shop_profile.yaml:/app/shop_profile.yaml
+      - ./logs:/app/logs
+    networks:
+      - ai-sales-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      n8n:
+        condition: service_healthy
+
+  # --------------------------------------------------------------------------
+  # Streamlit — operator approval dashboard
+  # --------------------------------------------------------------------------
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-sales-dashboard
+    restart: unless-stopped
+    command: >
+      streamlit run streamlit_app.py
+      --server.port 8501
+      --server.address 0.0.0.0
+      --server.headless true
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    volumes:
+      - app_data:/app/data
+      - ./shop_profile.yaml:/app/shop_profile.yaml
+      - ./logs:/app/logs
+    networks:
+      - ai-sales-network
+    depends_on:
+      fastapi:
+        condition: service_healthy
+
+# ----------------------------------------------------------------------------
+# Volumes
+# ----------------------------------------------------------------------------
+volumes:
+  n8n_data:
+    driver: local
+  app_data:
+    driver: local
+
+# ----------------------------------------------------------------------------
+# Networks
+# ----------------------------------------------------------------------------
+networks:
+  ai-sales-network:
+    driver: bridge

@@ -1,0 +1,197 @@
+{
+  "name": "04 - Owner Notification",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "owner-notify",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "notify-webhook-01",
+      "name": "Receive Event",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "owner-notify"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "combinator": "or" },
+          "conditions": [
+            {
+              "id": "cond-escalate",
+              "leftValue": "={{ $json.should_escalate }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            },
+            {
+              "id": "cond-complaint",
+              "leftValue": "={{ $json.intent }}",
+              "rightValue": "COMPLAINT",
+              "operator": { "type": "string", "operation": "equals" }
+            },
+            {
+              "id": "cond-hot-lead",
+              "leftValue": "={{ $json.intent === 'POTENTIAL_BUYER' && $json.confidence > 0.85 }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "notify-filter-02",
+      "name": "Needs Attention?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.should_escalate }}",
+                    "rightValue": true,
+                    "operator": { "type": "boolean", "operation": "equals" }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "escalation"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "COMPLAINT",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "complaint"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "POTENTIAL_BUYER",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "hot_lead"
+            }
+          ]
+        }
+      },
+      "id": "notify-switch-03",
+      "name": "Event Type Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [680, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build LINE Notify message for ESCALATION\nconst d = $input.first().json;\nconst icon = '🚨';\nconst msg = [\n  `${icon} [${d.shop_name || 'ร้านค้า'}] ต้องการการดูแลด่วน!`,\n  `📱 ช่องทาง: ${d.channel || '-'}`,\n  `👤 จาก: ${d.user_name || '-'}`,\n  `💬 \"${(d.comment_text || '').substring(0, 100)}\"`,\n  `🏷 ประเภท: ${d.intent || '-'} (${((d.confidence || 0) * 100).toFixed(0)}%)`,\n  `⚡ ต้องการการดูแล: ใช่ — trigger keyword detected`,\n  `🕐 เวลา: ${d.timestamp || new Date().toISOString()}`\n].join('\\n');\nreturn [{ json: { message: msg } }];"
+      },
+      "id": "notify-fmt-escalation-04a",
+      "name": "Format: Escalation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build LINE Notify message for COMPLAINT\nconst d = $input.first().json;\nconst icon = '😤';\nconst msg = [\n  `${icon} [${d.shop_name || 'ร้านค้า'}] มีลูกค้าร้องเรียน`,\n  `📱 ช่องทาง: ${d.channel || '-'}`,\n  `👤 จาก: ${d.user_name || '-'}`,\n  `💬 \"${(d.comment_text || '').substring(0, 100)}\"`,\n  `🏷 ประเภท: COMPLAINT (${((d.confidence || 0) * 100).toFixed(0)}%)`,\n  `⚡ ต้องการการดูแล: ควรติดต่อกลับ`,\n  `🕐 เวลา: ${d.timestamp || new Date().toISOString()}`\n].join('\\n');\nreturn [{ json: { message: msg } }];"
+      },
+      "id": "notify-fmt-complaint-04b",
+      "name": "Format: Complaint",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 260]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build LINE Notify message for HOT LEAD\nconst d = $input.first().json;\nconst icon = '🔥';\nconst msg = [\n  `${icon} [${d.shop_name || 'ร้านค้า'}] ลูกค้าสนใจซื้อ!`,\n  `📱 ช่องทาง: ${d.channel || '-'}`,\n  `👤 จาก: ${d.user_name || '-'}`,\n  `💬 \"${(d.comment_text || '').substring(0, 100)}\"`,\n  `🏷 ประเภท: POTENTIAL_BUYER (${((d.confidence || 0) * 100).toFixed(0)}%)`,\n  `⚡ ต้องการการดูแล: ติดตามเพื่อปิดการขาย`,\n  `🕐 เวลา: ${d.timestamp || new Date().toISOString()}`\n].join('\\n');\nreturn [{ json: { message: msg } }];"
+      },
+      "id": "notify-fmt-lead-04c",
+      "name": "Format: Hot Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://notify-api.line.me/api/notify",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.LINE_NOTIFY_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "message", "value": "={{ $json.message }}" }
+          ]
+        }
+      },
+      "id": "notify-line-05",
+      "name": "Send LINE Notify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 260],
+      "notes": "LINE Notify token: https://notify-bot.line.me/my/"
+    }
+  ],
+  "connections": {
+    "Receive Event": {
+      "main": [[{ "node": "Needs Attention?", "type": "main", "index": 0 }]]
+    },
+    "Needs Attention?": {
+      "main": [
+        [{ "node": "Event Type Switch", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Event Type Switch": {
+      "main": [
+        [{ "node": "Format: Escalation", "type": "main", "index": 0 }],
+        [{ "node": "Format: Complaint", "type": "main", "index": 0 }],
+        [{ "node": "Format: Hot Lead", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format: Escalation": {
+      "main": [[{ "node": "Send LINE Notify", "type": "main", "index": 0 }]]
+    },
+    "Format: Complaint": {
+      "main": [[{ "node": "Send LINE Notify", "type": "main", "index": 0 }]]
+    },
+    "Format: Hot Lead": {
+      "main": [[{ "node": "Send LINE Notify", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "staticData": null,
+  "tags": [{ "name": "ai-sales-bot" }],
+  "triggerCount": 1,
+  "versionId": "04-owner-notify-v1"
+}

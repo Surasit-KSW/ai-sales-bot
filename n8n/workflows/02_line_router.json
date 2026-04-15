@@ -1,0 +1,204 @@
+{
+  "name": "02 - LINE Message Router",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "line-message",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "line-webhook-01",
+      "name": "LINE Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "line-message"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verify LINE signature and parse event payload\nconst crypto = require('crypto');\nconst body = $input.first().json;\nconst headers = $input.first().headers;\n\nconst channelSecret = $env.LINE_CHANNEL_SECRET || '';\nconst signature = headers['x-line-signature'] || '';\n\n// Verify HMAC-SHA256 signature\nif (channelSecret) {\n  const bodyStr = JSON.stringify(body);\n  const expected = crypto\n    .createHmac('sha256', channelSecret)\n    .update(bodyStr)\n    .digest('base64');\n  if (expected !== signature) {\n    return [{ json: { skip: true, reason: 'invalid_signature' } }];\n  }\n}\n\n// Parse events — LINE sends an 'events' array\nconst events = body.events || [];\nconst messages = [];\n\nfor (const event of events) {\n  // Only handle text messages\n  if (event.type !== 'message') continue;\n  if (event.message?.type !== 'text') continue;\n\n  messages.push({\n    event_type: event.type,\n    reply_token: event.replyToken || '',\n    user_id: event.source?.userId || '',\n    user_name: event.source?.displayName || 'LINE User',\n    text: event.message?.text || '',\n    message_id: event.message?.id || '',\n    timestamp: new Date(event.timestamp).toISOString(),\n    channel: 'line'\n  });\n}\n\nif (messages.length === 0) {\n  return [{ json: { skip: true, reason: 'no_text_messages' } }];\n}\n\nreturn messages.map(m => ({ json: m }));"
+      },
+      "id": "line-parse-02",
+      "name": "Verify & Parse LINE Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-skip",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "notEquals" }
+            }
+          ]
+        }
+      },
+      "id": "line-filter-03",
+      "name": "Is Text Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FASTAPI_INTERNAL_URL || 'http://fastapi:8000' }}/process/comment",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ channel: $json.channel, text: $json.text, user_name: $json.user_name, reply_token: $json.reply_token, user_id: $json.user_id, timestamp: $json.timestamp }) }}"
+      },
+      "id": "line-process-04",
+      "name": "POST /process/comment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 220]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            },
+            {
+              "id": "cond-not-skip",
+              "leftValue": "={{ $json.was_skipped }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equals" }
+            },
+            {
+              "id": "cond-not-escalate",
+              "leftValue": "={{ $json.should_escalate }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "line-check-05",
+      "name": "Should Auto Reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/reply",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.LINE_CHANNEL_ACCESS_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ replyToken: $('Verify & Parse LINE Event').item.json.reply_token, messages: [{ type: 'text', text: $json.reply }] }) }}"
+      },
+      "id": "line-reply-06",
+      "name": "Reply via LINE API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678' }}/webhook/lead-capture",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json.lead_data) }}"
+      },
+      "id": "line-lead-07",
+      "name": "Trigger Lead Capture",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678' }}/webhook/owner-notify",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ ...$json.lead_data, needs_attention: $json.should_escalate || $json.intent === 'COMPLAINT' }) }}"
+      },
+      "id": "line-notify-08",
+      "name": "Trigger Owner Notify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 440]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678' }}/webhook/error-handler",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ source: '02_line_router', severity: 'warning', message: 'AI processing failed or escalated', data: $json }) }}"
+      },
+      "id": "line-error-09",
+      "name": "Report Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 560]
+    }
+  ],
+  "connections": {
+    "LINE Webhook": {
+      "main": [[{ "node": "Verify & Parse LINE Event", "type": "main", "index": 0 }]]
+    },
+    "Verify & Parse LINE Event": {
+      "main": [[{ "node": "Is Text Message?", "type": "main", "index": 0 }]]
+    },
+    "Is Text Message?": {
+      "main": [
+        [{ "node": "POST /process/comment", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "POST /process/comment": {
+      "main": [[{ "node": "Should Auto Reply?", "type": "main", "index": 0 }]]
+    },
+    "Should Auto Reply?": {
+      "main": [
+        [
+          { "node": "Reply via LINE API", "type": "main", "index": 0 },
+          { "node": "Trigger Lead Capture", "type": "main", "index": 0 },
+          { "node": "Trigger Owner Notify", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Trigger Lead Capture", "type": "main", "index": 0 },
+          { "node": "Trigger Owner Notify", "type": "main", "index": 0 },
+          { "node": "Report Error", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [{ "name": "ai-sales-bot" }],
+  "triggerCount": 1,
+  "versionId": "02-line-router-v1"
+}

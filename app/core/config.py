@@ -9,6 +9,7 @@ Keeping them separate lets shop owners update their product info and tone
 without touching any technical settings.
 """
 
+import requests
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,8 +31,8 @@ OUTPUT_FILE = DATA_DIR / "processed_results.json"
 class Config:
     # --- Ollama connection ---
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "gemma3:4b"          # upgrade to gemma3:12b for best quality
-    request_timeout_seconds: int = 90        # 4b model is slower than 2b — give it time
+    ollama_model: str = "gemma4:e4b"
+    request_timeout_seconds: int = 300       # gemma4:e4b (9.6 GB) ต้องการเวลามากกว่า gemma3:4b
 
     # --- Processing ---
     max_retries: int = 2
@@ -89,26 +90,56 @@ class Config:
         "{shop_context}\n\n"
         "กฎการตอบ:\n"
         "- {style_instructions}\n"
-        "- ตอบให้กระชับ ไม่เกิน 3-4 ประโยค\n"
+        "- ตรวจสอบ FAQ ในข้อมูลร้านก่อนเสมอ ถ้าคำถามตรงกับ FAQ ให้ตอบตาม FAQ นั้นทันที\n"
+        "- ถ้าลูกค้าถามหรือสนใจโปรโมชั่น ให้ดึงโปรโมชั่นที่เกี่ยวข้องมาแจ้งด้วย\n"
+        "- ถ้าลูกค้าถามเรื่องนโยบาย (คืน/เปลี่ยน/ชำระ/ส่ง) ให้ตอบตามนโยบายในข้อมูลร้านเท่านั้น\n"
+        "- ตอบตรงประเด็นที่ลูกค้าถามก่อนเสมอ อย่าออกนอกเรื่อง\n"
+        "- ตอบกระชับ 2-3 ประโยค ไม่ยืดเยื้อ\n"
+        "- ทุกข้อความต้องจบด้วย call-to-action ที่ชัดเจน เช่น บอกช่องทางสั่ง/ติดต่อ\n"
+        "- ใช้ข้อมูลร้านที่ให้ไว้เท่านั้น ห้ามแต่งข้อมูลขึ้นมาเอง\n"
         "- ห้าม Hard-sell หรือกดดันลูกค้า\n"
-        "- ใช้ข้อมูลร้านที่ให้ไว้ข้างต้นในการตอบ อย่าแต่งข้อมูลขึ้นมาเอง\n"
-        "- ถ้าไม่รู้คำตอบ ให้บอกลูกค้าว่าจะตรวจสอบและแจ้งกลับ"
+        "- ถ้าไม่รู้คำตอบ ให้บอกว่าจะตรวจสอบและแจ้งกลับทาง LINE ที่ระบุไว้"
     )
 
     # --- Reply Generator User Prompt ---
     generator_user_prompt_template: str = (
-        "สร้างข้อความตอบกลับสำหรับความคิดเห็นนี้:\n\n"
-        "ความคิดเห็น: \"{comment}\"\n"
-        "ประเภท: {intent}\n"
-        "อารมณ์ลูกค้า: {sentiment}\n\n"
-        "แนวทางตามประเภท:\n"
-        "- POTENTIAL_BUYER : ให้ข้อมูลสินค้า/ราคา/โปรโมชั่น + บอกช่องทางสั่งซื้อ\n"
-        "- GENERAL_INQUIRY : ตอบคำถามตรงๆ จากข้อมูลร้าน + เชิญชวนให้ถามเพิ่ม\n"
-        "- COMPLAINT       : ขอโทษ + แสดงความเข้าใจ + บอกวิธีแก้ไขที่ชัดเจน\n"
+        "ความคิดเห็นของลูกค้า: \"{comment}\"\n"
+        "ประเภท: {intent} | อารมณ์: {sentiment}\n\n"
+        "แนวทางการตอบ:\n"
+        "- POTENTIAL_BUYER : (1) ยืนยันราคา/โปรที่ถาม (2) เสนอจุดเด่นสั้นๆ (3) บอกช่องทางสั่งซื้อ\n"
+        "- GENERAL_INQUIRY : (1) ตอบคำถามโดยตรงจากข้อมูลร้าน (2) เชิญให้ทักมาถามเพิ่ม\n"
+        "- COMPLAINT       : (1) ขอโทษและแสดงความเข้าใจ (2) บอกวิธีแก้ไขพร้อมช่องทางติดต่อที่ชัดเจน\n"
         "- SPAM            : ตอบว่า SKIP เท่านั้น\n\n"
-        "ข้อความตอบกลับ:"
+        "ข้อความตอบกลับ (ตอบตรงๆ ห้ามขึ้นต้นด้วย 'ข้อความตอบกลับ:' หรือคำนำอื่นๆ):"
     )
 
 
+# ---------------------------------------------------------------------------
+# Model Resolution — fallback if preferred model is unavailable
+# ---------------------------------------------------------------------------
+_PREFERRED_MODEL = "gemma4:e4b"
+_FALLBACK_MODEL = "gemma3:4b"
+
+
+def _resolve_model() -> str:
+    """Return the preferred model if available in Ollama, else fall back."""
+    try:
+        resp = requests.get(
+            f"{Config.ollama_base_url}/api/tags",
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            available = [m["name"] for m in resp.json().get("models", [])]
+            if _PREFERRED_MODEL in available:
+                return _PREFERRED_MODEL
+    except Exception:
+        pass
+    print(
+        f"[WARNING] Model '{_PREFERRED_MODEL}' not found in Ollama. "
+        f"Falling back to '{_FALLBACK_MODEL}'."
+    )
+    return _FALLBACK_MODEL
+
+
 # Singleton — import this everywhere
-settings = Config()
+settings = Config(ollama_model=_resolve_model())

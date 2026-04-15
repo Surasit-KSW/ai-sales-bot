@@ -1,0 +1,129 @@
+{
+  "name": "03 - Lead Capture → Google Sheets",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-capture",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "lead-webhook-01",
+      "name": "Receive Lead Data",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "lead-capture"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "combinator": "or" },
+          "conditions": [
+            {
+              "id": "cond-buyer",
+              "leftValue": "={{ $json.intent }}",
+              "rightValue": "POTENTIAL_BUYER",
+              "operator": { "type": "string", "operation": "equals" }
+            },
+            {
+              "id": "cond-confidence",
+              "leftValue": "={{ $json.confidence }}",
+              "rightValue": 0.75,
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ]
+        }
+      },
+      "id": "lead-filter-02",
+      "name": "Is Qualified Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format lead row for Google Sheets\nconst d = $input.first().json;\nreturn [{\n  json: {\n    timestamp:    d.timestamp || new Date().toISOString(),\n    channel:      d.channel || '',\n    user_name:    d.user_name || '',\n    user_id:      d.user_id || '',\n    comment_text: d.comment_text || '',\n    intent:       d.intent || '',\n    confidence:   (d.confidence || 0).toFixed(2),\n    sentiment:    d.sentiment || '',\n    reply_sent:   d.reply_sent || '',\n    should_escalate: d.should_escalate ? 'YES' : 'no',\n    shop_name:    d.shop_name || ''\n  }\n}];"
+      },
+      "id": "lead-format-03",
+      "name": "Format Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 220]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp":       "={{ $json.timestamp }}",
+            "channel":         "={{ $json.channel }}",
+            "user_name":       "={{ $json.user_name }}",
+            "user_id":         "={{ $json.user_id }}",
+            "comment_text":    "={{ $json.comment_text }}",
+            "intent":          "={{ $json.intent }}",
+            "confidence":      "={{ $json.confidence }}",
+            "sentiment":       "={{ $json.sentiment }}",
+            "reply_sent":      "={{ $json.reply_sent }}",
+            "should_escalate": "={{ $json.should_escalate }}",
+            "shop_name":       "={{ $json.shop_name }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "lead-sheets-04",
+      "name": "Append to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [900, 220],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "name": "Google Sheets Account" }
+      },
+      "notes": "Credentials: set up Google Sheets OAuth2 in N8N settings"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Alternative: log to Airtable or local file if Sheets not configured\nconst d = $input.first().json;\nconsole.log('[LEAD SKIPPED - NOT QUALIFIED]', JSON.stringify(d));\nreturn [{ json: { skipped: true, reason: 'not_qualified_lead' } }];"
+      },
+      "id": "lead-skip-05",
+      "name": "Skip (Not Qualified)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 420]
+    }
+  ],
+  "connections": {
+    "Receive Lead Data": {
+      "main": [[{ "node": "Is Qualified Lead?", "type": "main", "index": 0 }]]
+    },
+    "Is Qualified Lead?": {
+      "main": [
+        [{ "node": "Format Row", "type": "main", "index": 0 }],
+        [{ "node": "Skip (Not Qualified)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format Row": {
+      "main": [[{ "node": "Append to Google Sheets", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "staticData": null,
+  "tags": [{ "name": "ai-sales-bot" }],
+  "triggerCount": 1,
+  "versionId": "03-lead-capture-v1"
+}

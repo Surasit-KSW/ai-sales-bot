@@ -3,11 +3,11 @@ Reply Generator Service.
 
 Takes a classified comment and generates a high-conversion Thai sales reply.
 
-Design note:
-  The generator is intentionally "dumb" about classification — it trusts
-  the AnalysisResult from the analyzer and focuses only on crafting the
-  best possible reply. This separation lets you A/B test different reply
-  strategies (e.g. formal vs. casual) without touching classification.
+v2 additions:
+  - Escalation check: comments containing trigger keywords (e.g. "โกง", "ฟ้อง")
+    are flagged for human review instead of being sent to the LLM.
+  - Richer system prompt: FAQ matching, promotions, and policies are surfaced
+    through the shop_context built by profile_loader.to_prompt_context().
 """
 
 from dataclasses import dataclass
@@ -21,7 +21,6 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # Comments classified as SPAM get this canned response — no LLM call needed.
-# This saves ~1-2s per spam comment and avoids unnecessary API load.
 SPAM_SKIP_MARKER = "SKIP"
 
 
@@ -30,13 +29,19 @@ class GeneratedReply:
     """Structured output from the generator."""
 
     reply: str
-    was_skipped: bool = False   # True for SPAM comments
+    was_skipped: bool = False    # True for SPAM comments
+    is_escalated: bool = False   # True when escalation keyword detected
     error: str = ""
 
 
 class ReplyGenerator:
     """
     Generates Thai sales replies based on comment intent.
+
+    Flow:
+      1. Escalation check  → flag for human if trigger keyword found
+      2. SPAM fast-path    → skip without LLM call
+      3. LLM generation    → inject shop context + style into system prompt
 
     Usage:
         generator = ReplyGenerator()
@@ -45,7 +50,7 @@ class ReplyGenerator:
 
     def __init__(self, client: OllamaClient | None = None, profile: ShopProfile | None = None) -> None:
         self.client = client or OllamaClient()
-        self.profile = profile or load_profile()  # load shop_profile.yaml once
+        self.profile = profile or load_profile()
 
     def generate(self, analysis: AnalysisResult) -> GeneratedReply:
         """
@@ -55,15 +60,24 @@ class ReplyGenerator:
             analysis: The AnalysisResult produced by CommentAnalyzer.
 
         Returns:
-            GeneratedReply containing the reply text.
-            SPAM comments return was_skipped=True with an empty reply.
+            GeneratedReply with reply text, skip/escalate flags, and any error.
         """
-        # Fast-path: don't waste tokens on spam
+        # --- 1. Escalation check (before anything else) ---
+        if self.profile.is_escalation_trigger(analysis.raw_comment):
+            logger.warning(
+                "Escalation triggered for comment: %.60s…", analysis.raw_comment
+            )
+            return GeneratedReply(
+                reply="",
+                is_escalated=True,
+            )
+
+        # --- 2. SPAM fast-path: don't waste tokens ---
         if analysis.intent == "SPAM":
             logger.info("Skipping SPAM comment: %.50s…", analysis.raw_comment)
             return GeneratedReply(reply="", was_skipped=True)
 
-        # If analysis itself failed (Ollama was down), skip gracefully
+        # --- 3. Graceful skip if analysis itself failed ---
         if analysis.error and not analysis.raw_comment.strip():
             return GeneratedReply(
                 reply="",
@@ -77,7 +91,8 @@ class ReplyGenerator:
             sentiment=analysis.sentiment,
         )
 
-        # Build system prompt with real shop data injected
+        # Build system prompt with full shop data (context includes FAQ,
+        # promotions, policies, categories — all from profile_loader v2)
         system_prompt = settings.generator_system_prompt.format(
             shop_context=self.profile.to_prompt_context(),
             style_instructions=self.profile.to_style_instructions(),

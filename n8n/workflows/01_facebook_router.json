@@ -1,0 +1,188 @@
+{
+  "name": "01 - Facebook Comment Router",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "facebook-comment",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "fb-webhook-01",
+      "name": "Facebook Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "facebook-comment"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse and validate Facebook webhook payload\nconst body = $input.first().json;\n\n// Facebook sends an 'entry' array of page events\nconst entries = body.entry || [];\nconst comments = [];\n\nfor (const entry of entries) {\n  const changes = entry.changes || [];\n  for (const change of changes) {\n    const value = change.value || {};\n    // Only process new comments (verb='add'), not edits or deletes\n    if (value.verb !== 'add') continue;\n    if (!value.message) continue;\n\n    comments.push({\n      verb: value.verb,\n      comment_id: value.comment_id || value.id || '',\n      post_id: value.post_id || '',\n      user_id: value.from?.id || '',\n      user_name: value.from?.name || 'Facebook User',\n      text: value.message || '',\n      timestamp: new Date(value.created_time * 1000).toISOString(),\n      channel: 'facebook'\n    });\n  }\n}\n\nif (comments.length === 0) {\n  return [{ json: { skip: true, reason: 'no_new_comments' } }];\n}\n\nreturn comments.map(c => ({ json: c }));"
+      },
+      "id": "fb-parse-02",
+      "name": "Parse FB Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "id": "cond-verb",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "notEquals" }
+            }
+          ]
+        }
+      },
+      "id": "fb-filter-03",
+      "name": "Is New Comment?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FASTAPI_INTERNAL_URL || 'http://fastapi:8000' }}/process/comment",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ channel: $json.channel, text: $json.text, user_name: $json.user_name, comment_id: $json.comment_id, post_id: $json.post_id, user_id: $json.user_id, timestamp: $json.timestamp }) }}"
+      },
+      "id": "fb-process-04",
+      "name": "POST /process/comment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [900, 220]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "cond-success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "fb-check-05",
+      "name": "AI Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $('Parse FB Payload').item.json.comment_id }}/comments",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ message: $json.reply, access_token: $env.FB_PAGE_ACCESS_TOKEN }) }}"
+      },
+      "id": "fb-reply-06",
+      "name": "Reply to Facebook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 140],
+      "notes": "Only runs when AUTO_REPLY is true — check $json.should_escalate first"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678' }}/webhook/lead-capture",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json.lead_data) }}"
+      },
+      "id": "fb-lead-07",
+      "name": "Trigger Lead Capture",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678' }}/webhook/owner-notify",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ ...$json.lead_data, needs_attention: $json.should_escalate || $json.intent === 'COMPLAINT' }) }}"
+      },
+      "id": "fb-notify-08",
+      "name": "Trigger Owner Notify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678' }}/webhook/error-handler",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify({ source: '01_facebook_router', severity: 'warning', message: 'AI processing failed', data: $json }) }}"
+      },
+      "id": "fb-error-09",
+      "name": "Report Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1340, 540]
+    }
+  ],
+  "connections": {
+    "Facebook Webhook": {
+      "main": [[{ "node": "Parse FB Payload", "type": "main", "index": 0 }]]
+    },
+    "Parse FB Payload": {
+      "main": [[{ "node": "Is New Comment?", "type": "main", "index": 0 }]]
+    },
+    "Is New Comment?": {
+      "main": [
+        [{ "node": "POST /process/comment", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "POST /process/comment": {
+      "main": [[{ "node": "AI Success?", "type": "main", "index": 0 }]]
+    },
+    "AI Success?": {
+      "main": [
+        [
+          { "node": "Reply to Facebook", "type": "main", "index": 0 },
+          { "node": "Trigger Lead Capture", "type": "main", "index": 0 },
+          { "node": "Trigger Owner Notify", "type": "main", "index": 0 }
+        ],
+        [{ "node": "Report Error", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [{ "name": "ai-sales-bot" }],
+  "triggerCount": 1,
+  "versionId": "01-facebook-router-v1"
+}
